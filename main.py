@@ -28,6 +28,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from db.database import init_db
+from utils.tiempo import ts_ahora
 from routes.impuestos    import router as impuestos_router
 from routes.contabilidad import router as contabilidad_router
 from routes.inventario   import router as inventario_router
@@ -76,16 +77,30 @@ async def auth_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    from datetime import datetime
-    print(f"[{datetime.now().isoformat()}] {request.method} {request.url.path} | IP: {request.client.host}")
+    print(f"[{ts_ahora()}] {request.method} {request.url.path} | IP: {request.client.host}")
     return await call_next(request)
 
-# ─── Rutas ────────────────────────────────────────────────────────────────────
+# ─── Rutas v1 (con versión explícita) ─────────────────────────────────────────
+# Los routers tienen prefix="/api/..." por compatibilidad con el orquestador.
+# Se montan también bajo /api/v1/... para que clientes nuevos usen rutas versionadas.
 
 app.include_router(impuestos_router)
 app.include_router(contabilidad_router)
 app.include_router(inventario_router)
 app.include_router(config_router)
+
+# Alias /api/v1/... — mismos routers, distinto prefix
+from fastapi import APIRouter as _AR
+
+def _versionar(router, prefix_original: str):
+    """Monta el mismo router bajo /api/v1/... además del path original."""
+    prefijo_v1 = prefix_original.replace("/api/", "/api/v1/", 1)
+    app.include_router(router, prefix=prefijo_v1)
+
+_versionar(impuestos_router,    "/api/impuestos")
+_versionar(contabilidad_router, "/api/contabilidad")
+_versionar(inventario_router,   "/api/inventario")
+_versionar(config_router,       "/api/config")
 
 # Chat CFO libre
 from fastapi import APIRouter
@@ -104,17 +119,46 @@ async def cfo_chat_endpoint(req: CfoChat):
 
 app.include_router(cfo_router)
 
+# ─── Contador de peticiones en vuelo (para health check) ─────────────────────
+# Incrementa cuando llega una petición autenticada, decrementa al responder.
+# Si supera el umbral, el health check lo reporta como advertencia.
+_peticiones_activas = 0
+_UMBRAL_COLA = 10
+
+@app.middleware("http")
+async def contar_peticiones(request: Request, call_next):
+    global _peticiones_activas
+    rutas_ignorar = {"/health", "/docs", "/openapi.json"}
+    if request.url.path not in rutas_ignorar and not request.url.path.startswith("/docs"):
+        _peticiones_activas += 1
+    try:
+        response = await call_next(request)
+    finally:
+        if request.url.path not in rutas_ignorar and not request.url.path.startswith("/docs"):
+            _peticiones_activas -= 1
+    return response
+
+
 # ─── Health check ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    from datetime import datetime
+    advertencia = None
+    if _peticiones_activas > _UMBRAL_COLA:
+        advertencia = (
+            f"{_peticiones_activas} peticiones activas simultáneas — "
+            "posible orquestador enviando solicitudes sin esperar respuesta"
+        )
+        print(f"[CFO] ⚠️  {advertencia}")
+
     return {
-        "status":    "ok",
-        "nombre":    "CFO Aragón Agent",
-        "version":   "1.0.0",
-        "agentes":   ["Gemini (SAT/parseo)", "Claude (análisis fiscal/financiero)"],
-        "timestamp": datetime.now().isoformat(),
+        "status":           "ok",
+        "nombre":           "CFO Aragón Agent",
+        "version":          "1.0.0",
+        "agentes":          ["Gemini (SAT/parseo)", "Claude (análisis fiscal/financiero)"],
+        "timestamp":        ts_ahora(),
+        "peticiones_activas": _peticiones_activas,
+        **({"advertencia": advertencia} if advertencia else {}),
     }
 
 # ─── Startup ──────────────────────────────────────────────────────────────────

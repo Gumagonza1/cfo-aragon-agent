@@ -1,13 +1,220 @@
 # CFO Aragón Agent
 
+FastAPI server on port **3002** acting as an automated CFO (Chief Financial Officer) for **Tacos Aragón**, a taquería in Culiacán, Sinaloa.
+
+Implements a **dual intelligent agent** system:
+
+| Agent | Responsibility |
+|-------|----------------|
+| Tax download and parsing | SAT authentication, CFDI XML download, invoice parsing |
+| Accounting and fiscal analysis | Income statement, balance sheet, ISR/IVA calculation, inventory analysis, CFO chat |
+
+---
+
+## Architecture
+
+```
+cfo_aragon_agent/
+├── main.py                  # FastAPI app, middlewares, auth, health
+├── agents/
+│   ├── cfo_agent.py         # CFO agent: P&L, balance, inventory, chat
+│   └── tax_agent.py         # Dual agent: SAT download + CFDI analysis
+├── routes/
+│   ├── contabilidad.py      # /api/contabilidad — income, expenses, income statement
+│   ├── impuestos.py         # /api/impuestos — CFDIs, declarations, fiscal XLSX
+│   ├── inventario.py        # /api/inventario — CRUD + analysis
+│   └── config.py            # /api/config — SAT/Gmail credential update
+├── db/
+│   ├── database.py          # SQLite with SQLAlchemy
+│   └── models.py            # Tables: Ingreso, Gasto, InventarioItem, AnalisisFiscal, DeclaracionMensual
+├── utils/
+│   └── tiempo.py            # Timezone utilities (GMT-7 / America/Hermosillo)
+├── requirements.txt
+├── .env.example             # Required environment variables (no real values)
+└── ecosystem.config.js      # PM2 configuration (NOT in git — contains credentials)
+```
+
+---
+
+## Main endpoints
+
+### Accounting (`/api/contabilidad`)
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/ingresos` | List income (filter `desde`, `hasta`) |
+| POST | `/ingresos` | Record income |
+| DELETE | `/ingresos/{id}` | Delete income |
+| GET | `/gastos` | List expenses |
+| POST | `/gastos` | Record expense |
+| DELETE | `/gastos/{id}` | Delete expense |
+| POST | `/estado-resultados` | Generate Income Statement |
+| POST | `/balance` | Generate Balance Sheet |
+| POST | `/chat` | Free chat with the CFO agent |
+
+### Taxes (`/api/impuestos`)
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| POST | `/analizar` | Download CFDIs from SAT and generate fiscal analysis |
+| GET | `/resultado` | Last saved analysis (filter by `mes`) |
+| GET | `/historial` | List last 24 analyses |
+| POST | `/chat` | Fiscal chat |
+| POST | `/subir-xml` | Upload XMLs or ZIPs of manual retentions |
+| GET | `/manuales/{mes}` | List manually uploaded XMLs |
+| DELETE | `/manuales/{mes}/{filename}` | Delete manual XML |
+| POST | `/exportar-xlsx` | Generate fiscal Excel (SAT + Gmail + manual) |
+| GET | `/descargar/{filename}` | Download generated Excel |
+| POST | `/declaracion` | Create/update monthly declaration (upsert) |
+| GET | `/declaracion/{mes}` | Get declaration for the month |
+| GET | `/declaraciones/{anio}` | List declarations for the year with totals |
+| PATCH | `/declaracion/{mes}/pagar` | Mark ISR or IVA as paid |
+| GET | `/vencimientos` | Next 3 months with status and urgency |
+| GET | `/anual/{anio}` | Annual summary with projection and $300K alert |
+| GET | `/gastos-recurrentes/{mes}` | Recurring vendors without CFDI in the month |
+
+### Inventory (`/api/inventario`)
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/` | List inventory with minimum alerts |
+| POST | `/` | Create item |
+| PUT | `/{id}` | Update item |
+| PATCH | `/{id}/cantidad` | Update quantity only |
+| DELETE | `/{id}` | Delete item |
+| GET | `/analisis` | Analyze inventory and detect alerts |
+
+### Configuration (`/api/config`)
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/credenciales` | Show active credentials (masked) |
+| PUT | `/credenciales` | Update SAT or Gmail credentials at runtime |
+
+### General
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/health` | Service status |
+| GET | `/docs` | Automatic Swagger documentation |
+| POST | `/api/cfo/chat` | Free CFO chat |
+
+---
+
+## Environment variables
+
+Copy `.env.example` to `.env` and fill in the values:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Description |
+|----------|-------------|
+| `API_TOKEN` | Secret token for request authentication (`x-api-token` header) |
+| `SAT_RFC` | Taxpayer RFC (e.g. `GOAG941101R17`) |
+| `SAT_KEY_PASSWORD` | Password for the SAT `.key` file |
+| `SAT_CER_PATH` | Absolute path to `firma.cer` |
+| `SAT_KEY_PATH` | Absolute path to `firma.key` |
+| `GEMINI_API_KEY` | Google AI API key (SAT download and XML parsing) |
+| `ANTHROPIC_API_KEY` | NLP API key (accounting and fiscal analysis) |
+| `EMAIL_USER` | Gmail address for receiving app retentions |
+| `EMAIL_PASS` | Gmail app password (not the regular password) |
+| `IMAP_SERVER` | IMAP server (default: `imap.gmail.com`) |
+| `TAX_BOT_PATH` | Absolute path to the `tax_aragon_bot` repository |
+| `PORT` | Server port (default: `3002`) |
+
+---
+
+## Installation
+
+```bash
+# 1. Clone
+git clone <repo-url>
+cd cfo_aragon_agent
+
+# 2. Virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 3. Dependencies
+pip install -r requirements.txt
+
+# 4. Environment variables
+cp .env.example .env
+# Edit .env with real values
+
+# 5. Run
+python main.py
+```
+
+Server available at `http://localhost:3002`.
+Swagger docs: `http://localhost:3002/docs`
+
+### With PM2 (production)
+
+```bash
+# Copy ecosystem.config.js.example and configure credentials
+pm2 start ecosystem.config.js
+pm2 save
+```
+
+---
+
+## Security
+
+- All routes (except `/health` and `/docs`) require the `x-api-token` header.
+- SAT credentials are never exposed in endpoints — they are masked when querying `/api/config/credenciales`.
+- `.env` and `ecosystem.config.js` are in `.gitignore` and must never be committed.
+- Rate limiting active via `slowapi`.
+
+---
+
+## Sync with tacos-aragon-app
+
+The Tacos Aragón frontend app consumes this API on port `3002`. Key modules the app uses:
+
+| App function | CFO Agent endpoint |
+|---|---|
+| Record daily sales | `POST /api/contabilidad/ingresos` |
+| Record expense | `POST /api/contabilidad/gastos` |
+| View monthly P&L | `POST /api/contabilidad/estado-resultados` |
+| Inventory control | `GET/POST/PATCH /api/inventario/` |
+| Monthly fiscal analysis | `POST /api/impuestos/analizar` |
+| View declarations | `GET /api/impuestos/declaracion/{mes}` |
+| Payment deadline alerts | `GET /api/impuestos/vencimientos` |
+| Export fiscal Excel | `POST /api/impuestos/exportar-xlsx` |
+| CFO chat | `POST /api/cfo/chat` |
+
+The app also depends on the **tax_aragon_bot** module (path configured in `TAX_BOT_PATH`) to access the SAT XML parsers and Excel exporter.
+
+---
+
+## Tax regime
+
+Tacos Aragón operates under a **dual regime**:
+
+- **Business Activities** — Arts. 100-110 LISR
+- **Technology Platforms** — Arts. 113-A to 113-C LISR (Didi Food, Uber Eats, Rappi)
+
+ISR retention on platforms: **2.1%** (Section I — food delivery)
+IVA retained by apps: **50% × 16% = 8%**
+Provisional declaration due: **17th of each month**
+
+---
+
+---
+
+# CFO Aragón Agent (ES)
+
 Servidor FastAPI en el puerto **3002** que actúa como CFO (Director Financiero) automatizado para **Tacos Aragón**, una taquería en Culiacán, Sinaloa.
 
-Implementa un sistema de **dos agentes de IA en paralelo**:
+Implementa un sistema de **dos agentes inteligentes en paralelo**:
 
-| Agente | Modelo | Responsabilidad |
-|--------|--------|-----------------|
-| Descarga y parseo fiscal | Gemini | Autenticación SAT, descarga de CFDIs en XML, parseo de comprobantes |
-| Análisis contable y fiscal | Claude (Anthropic) | Estado de resultados, balance general, cálculo ISR/IVA, análisis de inventario, chat CFO |
+| Agente | Responsabilidad |
+|--------|-----------------|
+| Descarga y parseo fiscal | Autenticación SAT, descarga de CFDIs en XML, parseo de comprobantes |
+| Análisis contable y fiscal | Estado de resultados, balance general, cálculo ISR/IVA, análisis de inventario, chat CFO |
 
 ---
 
@@ -17,16 +224,18 @@ Implementa un sistema de **dos agentes de IA en paralelo**:
 cfo_aragon_agent/
 ├── main.py                  # FastAPI app, middlewares, auth, health
 ├── agents/
-│   ├── cfo_agent.py         # Agente Claude: P&L, balance, inventario, chat
-│   └── tax_agent.py         # Agente dual: Gemini descarga SAT + Claude analiza CFDIs
+│   ├── cfo_agent.py         # Agente CFO: P&L, balance, inventario, chat
+│   └── tax_agent.py         # Agente dual: descarga SAT + análisis CFDIs
 ├── routes/
 │   ├── contabilidad.py      # /api/contabilidad — ingresos, gastos, estado de resultados
 │   ├── impuestos.py         # /api/impuestos — CFDIs, declaraciones, XLSX fiscal
-│   ├── inventario.py        # /api/inventario — CRUD + análisis Claude
+│   ├── inventario.py        # /api/inventario — CRUD + análisis
 │   └── config.py            # /api/config — actualización de credenciales SAT/Gmail
 ├── db/
 │   ├── database.py          # SQLite con SQLAlchemy
 │   └── models.py            # Tablas: Ingreso, Gasto, InventarioItem, AnalisisFiscal, DeclaracionMensual
+├── utils/
+│   └── tiempo.py            # Utilidades de zona horaria (GMT-7 / America/Hermosillo)
 ├── requirements.txt
 ├── .env.example             # Variables de entorno requeridas (sin valores reales)
 └── ecosystem.config.js      # Configuración PM2 (NO incluir en git — contiene credenciales)
@@ -46,18 +255,18 @@ cfo_aragon_agent/
 | GET | `/gastos` | Lista gastos |
 | POST | `/gastos` | Registra un gasto |
 | DELETE | `/gastos/{id}` | Elimina un gasto |
-| POST | `/estado-resultados` | Claude genera el Estado de Resultados |
-| POST | `/balance` | Claude genera el Balance General |
+| POST | `/estado-resultados` | Genera el Estado de Resultados |
+| POST | `/balance` | Genera el Balance General |
 | POST | `/chat` | Chat libre con el agente CFO |
 
 ### Impuestos (`/api/impuestos`)
 
 | Método | Ruta | Descripción |
 |--------|------|-------------|
-| POST | `/analizar` | Descarga CFDIs del SAT y genera análisis fiscal con Claude |
+| POST | `/analizar` | Descarga CFDIs del SAT y genera análisis fiscal |
 | GET | `/resultado` | Último análisis guardado (filtro por `mes`) |
 | GET | `/historial` | Lista los últimos 24 análisis |
-| POST | `/chat` | Chat fiscal con Claude |
+| POST | `/chat` | Chat fiscal |
 | POST | `/subir-xml` | Sube XMLs o ZIPs de retenciones manuales |
 | GET | `/manuales/{mes}` | Lista XMLs subidos manualmente |
 | DELETE | `/manuales/{mes}/{filename}` | Elimina XML manual |
@@ -80,7 +289,7 @@ cfo_aragon_agent/
 | PUT | `/{id}` | Actualiza ítem completo |
 | PATCH | `/{id}/cantidad` | Actualiza solo la cantidad |
 | DELETE | `/{id}` | Elimina ítem |
-| GET | `/analisis` | Claude analiza el inventario y detecta alertas |
+| GET | `/analisis` | Analiza el inventario y detecta alertas |
 
 ### Configuración (`/api/config`)
 
@@ -114,8 +323,8 @@ cp .env.example .env
 | `SAT_KEY_PASSWORD` | Contraseña del archivo `.key` del SAT |
 | `SAT_CER_PATH` | Ruta absoluta al archivo `firma.cer` |
 | `SAT_KEY_PATH` | Ruta absoluta al archivo `firma.key` |
-| `GEMINI_API_KEY` | API key de Google Gemini |
-| `ANTHROPIC_API_KEY` | API key de Anthropic (Claude) |
+| `GEMINI_API_KEY` | API key de Google AI (descarga SAT y parseo XML) |
+| `ANTHROPIC_API_KEY` | API key del agente de análisis fiscal/contable |
 | `EMAIL_USER` | Correo Gmail para recibir retenciones de apps |
 | `EMAIL_PASS` | Contraseña de aplicación Gmail (no la contraseña normal) |
 | `IMAP_SERVER` | Servidor IMAP (default: `imap.gmail.com`) |
